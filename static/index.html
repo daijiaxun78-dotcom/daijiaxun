@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>QDII 指数基金限额跟进</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">CHINA QDII FUND MONITOR</p>
+      <h1>美股指数基金限额跟进</h1>
+      <p class="subtitle">标准标普500 · 标普500等权重 · 标准纳斯达克100</p>
+    </div>
+    <span class="badge open">云端每日自动更新</span>
+  </header>
+
+  <main>
+    <section class="metrics" aria-label="摘要">
+      <article><span>收录份额</span><strong id="fundCount">—</strong></article>
+      <article><span>有限额 / 暂停</span><strong id="limitedCount">—</strong></article>
+      <article><span>数据截止日</span><strong id="latestDate">—</strong></article>
+      <article><span>公告已核验</span><strong id="verifiedCount">—</strong></article>
+    </section>
+
+    <section class="panel">
+      <div class="toolbar">
+        <label class="search"><span>搜索</span><input id="searchInput" placeholder="基金名称 / 代码 / 基金公司"></label>
+        <label><span>指数</span><select id="indexFilter"><option value="">全部指数</option></select></label>
+        <label><span>份额</span><select id="classFilter"><option value="">全部份额</option><option>A</option><option>C</option><option>D</option><option>I</option></select></label>
+        <label><span>申购状态</span><select id="statusFilter"><option value="">全部状态</option><option>开放申购</option><option>限制</option><option>暂停申购</option><option>待核验</option></select></label>
+        <button id="costBtn" class="ghost">份额成本比较</button>
+      </div>
+
+      <div id="notice" class="notice" hidden></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr id="tableHead"></tr></thead>
+          <tbody id="fundRows"></tbody>
+        </table>
+      </div>
+      <footer class="table-footer"><span id="rowCount"></span><span id="updatedAt"></span></footer>
+    </section>
+
+    <section class="methodology">
+      <h2>数据口径</h2>
+      <div>
+        <p><strong>今年以来</strong> 使用上一年度最后一条正式累计净值至最新正式累计净值计算，并同时展示净值截止日。</p>
+        <p><strong>渠道限额</strong> 天天基金页面提供该销售渠道的当前实际状态与上限；官方公告单独保存，用于核验全渠道或直销口径。</p>
+        <p><strong>基金规模</strong> 为最近一期披露值，必须与规模日期一起阅读，不代表实时规模。</p>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="detailDialog"><div id="detailContent"></div></dialog>
+  <dialog id="costDialog">
+    <form id="costForm">
+      <div class="dialog-title"><div><p class="eyebrow">SHARE CLASS COST</p><h2>A/C 类持有成本比较</h2></div><button type="button" class="icon" data-close>×</button></div>
+      <p class="muted">输入基金公告或销售渠道展示的实际费率。管理费、托管费和销售服务费已反映在净值中，这里只用于产品成本比较。</p>
+      <div class="form-grid">
+        <label><span>投资金额（元）</span><input name="amount" type="number" value="100000" min="0" required></label>
+        <label><span>预计持有天数</span><input name="days" type="number" value="365" min="0" required></label>
+        <div class="fee-heading">A 类</div><div class="fee-heading">C 类</div>
+        <label><span>A 申购费 %</span><input name="a_purchase" type="number" value="0.10" min="0" step="0.01"></label>
+        <label><span>C 申购费 %</span><input name="c_purchase" type="number" value="0" min="0" step="0.01"></label>
+        <label><span>A 赎回费 %</span><input name="a_redemption" type="number" value="0" min="0" step="0.01"></label>
+        <label><span>C 赎回费 %</span><input name="c_redemption" type="number" value="0" min="0" step="0.01"></label>
+        <label><span>A 销售服务费 %/年</span><input name="a_service" type="number" value="0" min="0" step="0.01"></label>
+        <label><span>C 销售服务费 %/年</span><input name="c_service" type="number" value="0.30" min="0" step="0.01"></label>
+        <label><span>A 管理费+托管费 %/年</span><input name="a_product" type="number" value="0.60" min="0" step="0.01"></label>
+        <label><span>C 管理费+托管费 %/年</span><input name="c_product" type="number" value="0.60" min="0" step="0.01"></label>
+      </div>
+      <div id="costResult" class="cost-result"></div>
+      <div class="dialog-actions"><button type="button" class="ghost" data-close>关闭</button><button class="primary" type="submit">计算成本</button></div>
+    </form>
+  </dialog>
+  <script src="/app.js"></script>
+</body>
+</html>
