@@ -5,3 +5,4 @@ static/data.json.tmp
 .runtime-password
 .tools/
 cloudflared*.log
+site/dist/
