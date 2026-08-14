@@ -1,6 +1,13 @@
 name: Update fund data
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - "export_static.py"
+      - "server.py"
+      - "tests/**"
+      - ".github/workflows/update-data.yml"
   schedule:
     - cron: "15 1,5,9,13 * * 1-5"
       timezone: "Asia/Shanghai"
