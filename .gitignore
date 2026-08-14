@@ -6,3 +6,4 @@ static/data.json.tmp
 .tools/
 cloudflared*.log
 site/dist/
+site/*.tar.gz
