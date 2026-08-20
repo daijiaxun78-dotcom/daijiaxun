@@ -27,22 +27,69 @@ class FundTrackerTests(unittest.TestCase):
         indices = {fund[2] for fund in server.FUNDS}
         self.assertEqual(indices, {"S&P 500", "S&P 500 Equal Weight", "NASDAQ-100"})
 
-    def test_ytd_uses_previous_year_last_cumulative_nav(self):
+    def test_ytd_compounds_daily_growth_rates(self):
         code = "018043"
         previous_year = date.today().year - 1
         current_year = date.today().year
         with server.connect() as db:
             db.executemany(
-                "INSERT INTO navs VALUES (?,?,?,?,?,?,?,?)",
+                """INSERT INTO navs
+                   (fund_code,nav_date,unit_nav,cumulative_nav,daily_growth_rate,
+                    purchase_status,redemption_status,source_url,fetched_at)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
                 [
-                    (code, f"{previous_year}-12-30", 1.0, 1.0, "开放申购", "开放赎回", "test", "now"),
-                    (code, f"{previous_year}-12-31", 1.1, 1.1, "开放申购", "开放赎回", "test", "now"),
-                    (code, f"{current_year}-01-02", 1.21, 1.21, "开放申购", "开放赎回", "test", "now"),
+                    (code, f"{previous_year}-12-30", 1.0, 1.0, None, "开放申购", "开放赎回", "test", "now"),
+                    (code, f"{previous_year}-12-31", 1.1, 1.1, None, "开放申购", "开放赎回", "test", "now"),
+                    (code, f"{current_year}-01-02", 1.21, 1.21, 10.0, "开放申购", "开放赎回", "test", "now"),
                 ],
             )
         fund = next(item for item in server.list_funds() if item["code"] == code)
         self.assertEqual(fund["ytd_base_date"], f"{previous_year}-12-31")
         self.assertAlmostEqual(fund["ytd"], 10.0)
+
+    def test_ytd_includes_distributions_via_daily_growth_rates(self):
+        code = "018043"
+        previous_year = date.today().year - 1
+        current_year = date.today().year
+        with server.connect() as db:
+            db.executemany(
+                """INSERT INTO navs
+                   (fund_code,nav_date,unit_nav,cumulative_nav,daily_growth_rate,
+                    purchase_status,redemption_status,source_url,fetched_at)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                [
+                    (code, f"{previous_year}-12-31", 1.0, 1.0, None, "open", "open", "test", "now"),
+                    (code, f"{current_year}-01-02", 1.1, 1.1, 10.0, "open", "open", "test", "now"),
+                    (code, f"{current_year}-01-15", 0.95, 1.15, 5.0, "open", "open", "test", "now"),
+                ],
+            )
+        fund = next(item for item in server.list_funds() if item["code"] == code)
+        self.assertAlmostEqual(fund["ytd"], 15.5)
+
+    def test_current_platform_ytd_takes_precedence_over_rounded_daily_rates(self):
+        code = "018043"
+        previous_year = date.today().year - 1
+        current_year = date.today().year
+        latest_date = f"{current_year}-01-15"
+        with server.connect() as db:
+            db.execute(
+                "UPDATE funds SET platform_ytd=?, platform_ytd_date=? WHERE code=?",
+                (15.48, latest_date, code),
+            )
+            db.executemany(
+                """INSERT INTO navs
+                   (fund_code,nav_date,unit_nav,cumulative_nav,daily_growth_rate,
+                    purchase_status,redemption_status,source_url,fetched_at)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                [
+                    (code, f"{previous_year}-12-31", 1.0, 1.0, None, "open", "open", "test", "now"),
+                    (code, f"{current_year}-01-02", 1.1, 1.1, 10.0, "open", "open", "test", "now"),
+                    (code, latest_date, 0.95, 1.15, 5.0, "open", "open", "test", "now"),
+                ],
+            )
+        fund = next(item for item in server.list_funds() if item["code"] == code)
+        self.assertEqual(fund["ytd"], 15.48)
+        self.assertEqual(fund["ytd_source"], "天天基金阶段涨幅")
 
     def test_seed_limit_is_bound_to_each_share_code(self):
         funds = {item["code"]: item for item in server.list_funds()}
@@ -86,12 +133,19 @@ class FundTrackerTests(unittest.TestCase):
         <span class='letterSpace01'>成 立 日</span>：2023-11-29
         <span class='letterSpace01'>管 理 人</span>：<a>招商基金</a>
         跟踪标的：</a>纳斯达克100指数 | <span>交易状态：</span><span>限大额
-        (<span>单日累计购买上限10.00元</span>)</span><span>开放赎回</span>"""
+        (<span>单日累计购买上限10.00元</span>)</span><span>开放赎回</span>
+        <span id="jdzfDate">2026-08-18</span>
+        <li id="increaseAmount_stage"><table><tr>
+        <td><div class="Rdata">1.00%</div></td><td><div class="Rdata">2.00%</div></td>
+        <td><div class="Rdata">3.00%</div></td><td><div class="Rdata">4.00%</div></td>
+        <td><div class="Rdata ui-color-red bold">12.89%</div></td></tr></table>"""
         fund = server.parse_sales_page("019547", "招商纳斯达克100ETF发起式联接(QDII)A", page)
         self.assertEqual(fund["index_key"], "NASDAQ-100")
         self.assertEqual(fund["share_class"], "A")
         self.assertEqual(fund["status"], "有限额")
         self.assertEqual(fund["limit_amount"], 10)
+        self.assertEqual(fund["platform_ytd"], 12.89)
+        self.assertEqual(fund["platform_ytd_date"], "2026-08-18")
 
     def test_sales_page_parses_class_before_currency_suffix(self):
         fund = server.parse_sales_page("021838", "嘉实纳斯达克100ETF发起联接(QDII)I人民币", "")

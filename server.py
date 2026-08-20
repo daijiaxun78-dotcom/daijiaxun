@@ -78,6 +78,7 @@ CREATE TABLE IF NOT EXISTS navs (
   nav_date TEXT NOT NULL,
   unit_nav REAL,
   cumulative_nav REAL,
+  daily_growth_rate REAL,
   purchase_status TEXT,
   redemption_status TEXT,
   source_url TEXT NOT NULL,
@@ -138,9 +139,13 @@ def init_db() -> None:
         existing_columns = {row[1] for row in db.execute("PRAGMA table_info(funds)")}
         for name, definition in (("snapshot_ytd", "REAL"), ("snapshot_date", "TEXT"),
                                  ("snapshot_fee", "REAL"), ("data_quality", "TEXT"),
-                                 ("is_active", "INTEGER NOT NULL DEFAULT 1")):
+                                 ("is_active", "INTEGER NOT NULL DEFAULT 1"),
+                                 ("platform_ytd", "REAL"), ("platform_ytd_date", "TEXT")):
             if name not in existing_columns:
                 db.execute(f"ALTER TABLE funds ADD COLUMN {name} {definition}")
+        nav_columns = {row[1] for row in db.execute("PRAGMA table_info(navs)")}
+        if "daily_growth_rate" not in nav_columns:
+            db.execute("ALTER TABLE navs ADD COLUMN daily_growth_rate REAL")
         db.executemany(
             """INSERT INTO funds
                (code,name,index_key,share_class,currency,manager,inception_date)
@@ -267,6 +272,11 @@ def parse_sales_page(code: str, name: str, page: str) -> dict:
     manager = first(r"管\s*理\s*人</span>：<a[^>]*>(.*?)</a>")
     size_match = re.search(r"规模</a>：([\d.]+)亿元（(\d{4}-\d{2}-\d{2})）", page)
     target = first(r"跟踪标的：</a>(.*?)\s*\|")
+    stage_match = re.search(r'id="increaseAmount_stage".*?</table>', page, re.DOTALL)
+    stage_values = re.findall(r'<div class="Rdata[^"]*">\s*([+-]?[\d.]+)%\s*</div>',
+                              stage_match.group(0)) if stage_match else []
+    platform_ytd = float(stage_values[4]) if len(stage_values) >= 5 else None
+    platform_ytd_date = first(r'id="jdzfDate">(\d{4}-\d{2}-\d{2})</span>')
     status_text = first(r"交易状态：</span><span[^>]*>(.*?)</span><span") or ""
     amount_match = re.search(r"单日累计购买上限([\d,.]+)元", status_text)
     if "暂不开放购买" in page:
@@ -287,6 +297,7 @@ def parse_sales_page(code: str, name: str, page: str) -> dict:
         "manager": manager or "待补充", "inception_date": inception,
         "asset_size_billion": float(size_match.group(1)) if size_match else None,
         "asset_size_date": size_match.group(2) if size_match else None,
+        "platform_ytd": platform_ytd, "platform_ytd_date": platform_ytd_date,
         "target": target, "status": status, "limit_amount": amount,
         "source_url": f"https://fund.eastmoney.com/{code}.html",
     }
@@ -336,18 +347,21 @@ def sync_sales_catalog() -> list[str]:
             db.execute(
                 """INSERT INTO funds
                    (code,name,index_key,share_class,currency,manager,inception_date,
-                    asset_size_billion,asset_size_date,profile_source_url,updated_at,data_quality,is_active)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,'sales_live',1)
+                    asset_size_billion,asset_size_date,profile_source_url,updated_at,
+                    platform_ytd,platform_ytd_date,data_quality,is_active)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'sales_live',1)
                    ON CONFLICT(code) DO UPDATE SET name=excluded.name,index_key=excluded.index_key,
                    share_class=excluded.share_class,currency=excluded.currency,manager=excluded.manager,
                    inception_date=COALESCE(excluded.inception_date,funds.inception_date),
                    asset_size_billion=COALESCE(excluded.asset_size_billion,funds.asset_size_billion),
                    asset_size_date=COALESCE(excluded.asset_size_date,funds.asset_size_date),
+                   platform_ytd=excluded.platform_ytd,platform_ytd_date=excluded.platform_ytd_date,
                    profile_source_url=excluded.profile_source_url,updated_at=excluded.updated_at,
                    data_quality='sales_live',is_active=1""",
                 (fund["code"], fund["name"], fund["index_key"], fund["share_class"], "CNY",
                  fund["manager"], fund["inception_date"], fund["asset_size_billion"],
-                 fund["asset_size_date"], fund["source_url"], now),
+                 fund["asset_size_date"], fund["source_url"], now,
+                 fund["platform_ytd"], fund["platform_ytd_date"]),
             )
             db.execute(
                 """UPDATE limit_events SET effective_to=date(?,'-1 day')
@@ -391,17 +405,36 @@ def refresh_fund(code: str) -> int:
     rows = []
     source_url = ""
     for start, end in ranges:
-        params = urllib.parse.urlencode(
-            {"fundCode": code, "pageIndex": 1, "pageSize": 100, "startDate": start, "endDate": end}
-        )
-        url = f"https://api.fund.eastmoney.com/f10/lsjz?{params}"
-        source_url = source_url or url
-        payload = api_get(url)
-        data = payload.get("Data")
-        if not isinstance(data, dict):
-            message = payload.get("ErrMsg") or f"上游接口未返回数据（ErrCode={payload.get('ErrCode')}）"
-            raise ValueError(message)
-        rows.extend(data.get("LSJZList") or [])
+        page_index = 1
+        with connect() as db:
+            known_growth_dates = {
+                row[0] for row in db.execute(
+                    "SELECT nav_date FROM navs WHERE fund_code=? AND nav_date>=? AND nav_date<=? "
+                    "AND daily_growth_rate IS NOT NULL",
+                    (code, start, end),
+                )
+            }
+        while True:
+            params = urllib.parse.urlencode(
+                {"fundCode": code, "pageIndex": page_index, "pageSize": 100,
+                 "startDate": start, "endDate": end}
+            )
+            url = f"https://api.fund.eastmoney.com/f10/lsjz?{params}"
+            source_url = source_url or url
+            payload = api_get(url)
+            data = payload.get("Data")
+            if not isinstance(data, dict):
+                message = payload.get("ErrMsg") or f"上游接口未返回数据（ErrCode={payload.get('ErrCode')}）"
+                raise ValueError(message)
+            page_rows = data.get("LSJZList") or []
+            rows.extend(page_rows)
+            if start.endswith("-12-01") or any(row.get("FSRQ") in known_growth_dates for row in page_rows):
+                break
+            page_size = payload.get("PageSize") or len(page_rows)
+            total_count = payload.get("TotalCount") or len(page_rows)
+            if not page_rows or page_index * page_size >= total_count:
+                break
+            page_index += 1
     now = datetime.now().astimezone().isoformat(timespec="seconds")
     values = []
     for row in rows:
@@ -411,6 +444,7 @@ def refresh_fund(code: str) -> int:
                 row["FSRQ"],
                 float(row["DWJZ"]) if row.get("DWJZ") else None,
                 float(row["LJJZ"]) if row.get("LJJZ") else None,
+                float(row["JZZZL"]) if row.get("JZZZL") not in (None, "") else None,
                 row.get("SGZT"),
                 row.get("SHZT"),
                 source_url,
@@ -419,9 +453,13 @@ def refresh_fund(code: str) -> int:
         )
     with connect() as db:
         db.executemany(
-            """INSERT INTO navs VALUES (?,?,?,?,?,?,?,?)
+            """INSERT INTO navs
+               (fund_code,nav_date,unit_nav,cumulative_nav,daily_growth_rate,
+                purchase_status,redemption_status,source_url,fetched_at)
+               VALUES (?,?,?,?,?,?,?,?,?)
                ON CONFLICT(fund_code,nav_date) DO UPDATE SET
                unit_nav=excluded.unit_nav,cumulative_nav=excluded.cumulative_nav,
+               daily_growth_rate=excluded.daily_growth_rate,
                purchase_status=excluded.purchase_status,redemption_status=excluded.redemption_status,
                source_url=excluded.source_url,fetched_at=excluded.fetched_at""",
             values,
@@ -459,6 +497,13 @@ def list_funds() -> list[dict]:
                    ORDER BY nav_date DESC LIMIT 1""",
                 (fund["code"], f"{previous_year}-01-01", f"{current_year}-01-01"),
             ).fetchone()
+            daily_returns = db.execute(
+                """SELECT nav_date, daily_growth_rate FROM navs
+                   WHERE fund_code=? AND nav_date>=? AND nav_date<=?
+                   ORDER BY nav_date""",
+                (fund["code"], f"{current_year}-01-01",
+                 latest["nav_date"] if latest else f"{current_year}-12-31"),
+            ).fetchall()
             official_limit = db.execute(
                 """SELECT * FROM limit_events WHERE fund_code=? AND effective_from<=date('now','localtime')
                    AND (effective_to IS NULL OR effective_to>=date('now','localtime'))
@@ -492,9 +537,18 @@ def list_funds() -> list[dict]:
                 official_limit=dict(official_limit) if official_limit else None,
                 channel_limit=dict(channel_limit) if channel_limit else None,
             )
-            if latest and base and latest["cumulative_nav"] and base["cumulative_nav"]:
-                item["ytd"] = (latest["cumulative_nav"] / base["cumulative_nav"] - 1) * 100
-                item["ytd_source"] = "正式净值计算"
+            if (latest and base and daily_returns
+                    and daily_returns[0]["nav_date"] <= f"{current_year}-01-10"
+                    and all(row["daily_growth_rate"] is not None for row in daily_returns)):
+                growth = 1.0
+                for row in daily_returns:
+                    growth *= 1 + row["daily_growth_rate"] / 100
+                item["ytd"] = (growth - 1) * 100
+                item["ytd_source"] = "正式日增长率复利计算"
+            if (latest and fund["platform_ytd"] is not None
+                    and fund["platform_ytd_date"] == latest["nav_date"]):
+                item["ytd"] = fund["platform_ytd"]
+                item["ytd_source"] = "天天基金阶段涨幅"
             result.append(item)
         return result
 
