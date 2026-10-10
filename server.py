@@ -60,7 +60,7 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS funds (
   code TEXT PRIMARY KEY,
   name TEXT NOT NULL,
-  index_key TEXT NOT NULL CHECK(index_key IN ('S&P 500','S&P 500 Equal Weight','NASDAQ-100')),
+  index_key TEXT NOT NULL CHECK(index_key IN ('S&P 500','S&P 500 Equal Weight','NASDAQ-100','NASDAQ-100 Technology')),
   share_class TEXT NOT NULL,
   currency TEXT NOT NULL DEFAULT 'CNY',
   manager TEXT NOT NULL,
@@ -248,6 +248,10 @@ def fetch_text(url: str, referer: str = "https://fund.eastmoney.com/") -> str:
 def classify_target(name: str) -> str | None:
     if "标普500等权重" in name:
         return "S&P 500 Equal Weight"
+    # 「纳斯达克科技市值加权指数」(NDXTMC) 与「纳斯达克100」(NDX) 是两个不同指数，单独成组。
+    # 注意「纳指科技」不会误匹配「纳指生物科技」（中间隔字，非子串）。
+    if "纳斯达克科技" in name or "纳指科技" in name:
+        return "NASDAQ-100 Technology"
     if "纳斯达克100" in name or "纳指100" in name:
         return "NASDAQ-100"
     if "标普500" in name:
@@ -279,15 +283,18 @@ def parse_sales_page(code: str, name: str, page: str) -> dict:
     platform_ytd_date = first(r'id="jdzfDate">(\d{4}-\d{2}-\d{2})</span>')
     status_text = first(r"交易状态：</span><span[^>]*>(.*?)</span><span") or ""
     amount_match = re.search(r"单日累计购买上限([\d,.]+)元", status_text)
-    if "暂不开放购买" in page:
-        status, amount = "不代销", None
-    elif "暂停申购" in status_text:
+    # 以「交易状态」块为准；"暂不开放购买"仅作兜底（避免页面其它位置的该句误触发不代销）
+    if "暂停申购" in status_text:
         status, amount = "暂停申购", None
     elif "限大额" in status_text:
         status = "有限额"
         amount = float(amount_match.group(1).replace(",", "")) if amount_match else None
     elif "开放申购" in status_text:
         status, amount = "开放申购", None
+    elif "暂不开放购买" in status_text:
+        status, amount = "不代销", None
+    elif "暂不开放购买" in page and not status_text.strip():
+        status, amount = "不代销", None
     else:
         status, amount = "待核验", None
     class_match = re.search(r"([ACDEFI])(?:人民币|\(人民币\))?$", name)
